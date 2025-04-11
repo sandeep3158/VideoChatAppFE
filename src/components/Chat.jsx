@@ -35,6 +35,7 @@ const Chat = () => {
     return [];
   }, [socketId, users]);
 
+  console.log('isActive', !!activeUsers);
   const stopMediaTracks = useCallback((stream) => {
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
