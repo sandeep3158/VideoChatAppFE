@@ -126,7 +126,6 @@ const Chat = () => {
   const handleEndChat = useCallback(() => {
     if (roomId) {
       socket.emit("end chat", roomId);
-      connectionRef.current.destroy();
     }
   }, [roomId]);
 
@@ -237,13 +236,6 @@ const Chat = () => {
       setMessages((prev) => [...prev, messageData]);
     });
 
-    socket.on("close chat room", () => {
-      setShowChat(false);
-      setRoomId(null);
-      setMessages([]);
-      connectionRef.current.destroy();
-    });
-
     socket.on("getUserCall", async (data) => {
       try {
         const stream = await getMediaStream();
@@ -284,6 +276,7 @@ const Chat = () => {
       setUsers([]);
       setLoading(false);
       setMessages([]);
+      connectionRef.current.destroy();
     });
 
     return () => {
