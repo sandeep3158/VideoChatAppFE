@@ -141,6 +141,21 @@ const Chat = () => {
   }, [isLaoding, roomId]);
 
   useEffect(() => {
+    const handleUnload = () => {
+      handleEndChat();
+    };
+  
+    window.addEventListener("beforeunload", handleUnload);
+    window.addEventListener("unload", handleUnload); // backup in some browsers
+  
+    return () => {
+      window.removeEventListener("beforeunload", handleUnload);
+      window.removeEventListener("unload", handleUnload);
+    };
+  }, [handleEndChat]);
+
+  
+  useEffect(() => {
     if (activeUsers.length === 0 || !socketId) return;
     const availableUsers = activeUsers.filter(
       (user) => !user.isBusy && user.socketId !== socketId
