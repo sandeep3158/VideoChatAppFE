@@ -27,7 +27,7 @@ const Chat = () => {
   const connectionRef = useRef();
 
   const activeUsers = useMemo(() => {
-    if (socketId && users.length > 0) {
+    if (socketId && users?.length > 0) {
       return (users || []).filter((user) => {
         return user.socketId !== socketId;
       });
