@@ -14,9 +14,6 @@ export default defineConfig({
       buffer: "buffer/",
     },
   },
-  server: {
-    allowedHosts: ["1a79-203-134-205-34.ngrok-free.app"],
-  },
   plugins: [react(), tailwindcss(), flowbiteReact()],
   optimizeDeps: {
     esbuildOptions: {
