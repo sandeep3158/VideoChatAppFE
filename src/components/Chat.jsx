@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Peer from "simple-peer";
 import { io } from "socket.io-client";
 import { ChatComp } from "./ChatComp";
@@ -17,7 +17,6 @@ const Chat = () => {
   const [username, setUsername] = useState("");
   const [showChat, setShowChat] = useState(false);
   const [roomId, setRoomId] = useState(null);
-  const [users, setUsers] = useState([]);
   const [socketId, setSocketId] = useState(null);
   const [localStream, setLocalStream] = useState();
   const [remoteStream, setRemoteStream] = useState();
@@ -26,16 +25,6 @@ const Chat = () => {
   const [isUserNotFound, setIsUserNotFound] = useState(false);
   const connectionRef = useRef();
 
-  const activeUsers = useMemo(() => {
-    if (socketId && users?.length > 0) {
-      return (users || []).filter((user) => {
-        return user.socketId !== socketId;
-      });
-    }
-    return [];
-  }, [socketId, users]);
-
-  console.log('isActive', !!activeUsers.length);
   const stopMediaTracks = useCallback((stream) => {
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
@@ -143,44 +132,30 @@ const Chat = () => {
     const handleUnload = () => {
       handleEndChat();
     };
-  
+
     window.addEventListener("beforeunload", handleUnload);
     window.addEventListener("unload", handleUnload); // backup in some browsers
-  
+
     return () => {
       window.removeEventListener("beforeunload", handleUnload);
       window.removeEventListener("unload", handleUnload);
     };
   }, [handleEndChat]);
 
-  
   useEffect(() => {
-    if (activeUsers.length === 0 || !socketId) return;
-    const availableUsers = activeUsers.filter(
-      (user) => !user.isBusy && user.socketId !== socketId
-    );
-
-    if (availableUsers.length === 0) {
-      return;
-    }
-
-    const randomUser =
-      availableUsers[Math.floor(Math.random() * availableUsers.length)];
-
-    if (!randomUser) return;
-
-    if (!loading && socketId < randomUser.socketId) {
-      socket.emit("invite private chat", randomUser.socketId);
-    }
-  }, [activeUsers, loading, socketId]);
-
-  useEffect(() => {
-    socket.on("get user list", (userList) => {
-      setUsers(userList);
-    });
-
     socket.on("get socket id", (socketId) => {
       setSocketId(socketId);
+    });
+
+    socket.on("getMatchedPeer", (peerSocketId) => {
+      console.log('peerSocketId =>', peerSocketId);
+      console.log('socketId =>', socketId);
+      if (!peerSocketId || !socketId) return;
+
+      // Ensure we're not loading and initiate only from the lower socketId
+      if (!loading && socketId < peerSocketId) {
+        socket.emit("invite private chat", peerSocketId);
+      }
     });
 
     socket.on("invite requested", (inviterId) => {
@@ -273,15 +248,14 @@ const Chat = () => {
       setUsername("");
       setInput("");
       setSocketId(null);
-      setUsers([]);
       setLoading(false);
       setMessages([]);
-      connectionRef.current.destroy();
+      connectionRef?.current?.destroy();
     });
 
     return () => {
-      socket.off("get user list");
       socket.off("get socket id");
+      socket.off("getMatchedPeer");
       socket.off("callAccepted");
       socket.off("invite requested");
       socket.off("enter chat room");
@@ -290,7 +264,14 @@ const Chat = () => {
       socket.off("getUserCall");
       socket.off("close chat room");
     };
-  }, [getMediaStream, localStream, socketId, stopMediaTracks, username]);
+  }, [
+    getMediaStream,
+    loading,
+    localStream,
+    socketId,
+    stopMediaTracks,
+    username,
+  ]);
 
   return isUserNotFound ? (
     <NoUserFound />
