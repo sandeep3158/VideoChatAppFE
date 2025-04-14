@@ -5,7 +5,7 @@ export const LoadingSpinner = () => {
     <div className="flex items-center justify-center min-h-screen bg-gray-100">
       <div className="flex flex-col items-center">
         <Spinner size="xl" />
-        <p className="mt-4 text-lg font-semibold text-gray-700">Searhing for active online users...</p>
+        <p className="mt-4 text-lg font-semibold text-gray-700">Searching for active online users...</p>
       </div>
     </div>
   );
