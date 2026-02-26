@@ -1,7 +1,6 @@
-import React from "react";
 import ReactPlayer from "react-player";
 
-export const Streams = ({ remoteStream, localStream }) => {
+export const Streams = ({ remoteStream, localStream }: any) => {
   return (
     <div className="w-full md:w-[65%] relative flex flex-col bg-black rounded-xl overflow-hidden shadow-xl">
       {/* Remote Stream (Main View) */}

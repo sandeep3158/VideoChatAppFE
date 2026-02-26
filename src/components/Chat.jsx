@@ -8,55 +8,48 @@ import { NoUserFound } from "./NoUserFound";
 import { Streams } from "./Streams";
 
 const SOCKET_SERVER_URL = import.meta.env.VITE_BEURL;
+const NO_PEER_TIMEOUT   = 30_000;   // 30s  — no peer found at all
+const SIGNALING_TIMEOUT = 120_000;  // 2min — peer found, waiting for WebRTC
 
 const socket = io(SOCKET_SERVER_URL, { autoConnect: true });
 
 const Chat = () => {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [username, setUsername] = useState("");
-  const [showChat, setShowChat] = useState(false);
-  const [roomId, setRoomId] = useState(null);
-  const [socketId, setSocketId] = useState(null);
-  const [localStream, setLocalStream] = useState();
-  const [remoteStream, setRemoteStream] = useState();
-  const [loading, setLoading] = useState(false);
-  const [isLaoding, setIsLoading] = useState(false);
+  const [messages,       setMessages]       = useState([]);
+  const [input,          setInput]          = useState("");
+  const [username,       setUsername]       = useState("");
+  const [showChat,       setShowChat]       = useState(false);
+  const [roomId,         setRoomId]         = useState(null);
+  const [socketId,       setSocketId]       = useState(null);
+  const [localStream,    setLocalStream]    = useState(null);
+  const [remoteStream,   setRemoteStream]   = useState(null);
+  const [loading,        setLoading]        = useState(false);
+  const [isLaoding,      setIsLoading]      = useState(false);
   const [isUserNotFound, setIsUserNotFound] = useState(false);
-  const connectionRef = useRef();
+  const [mediaError,     setMediaError]     = useState(null);
+  const [isRetrying,     setIsRetrying]     = useState(false);
+
+  const connectionRef    = useRef(null);
+  const timeoutRef       = useRef(null);
+  const localStreamRef   = useRef(null);
+  const socketIdRef      = useRef(null);
+  const isUserNotFoundRef = useRef(false);
+  const usernameRef      = useRef("");
+
+  useEffect(() => { localStreamRef.current    = localStream;    }, [localStream]);
+  useEffect(() => { socketIdRef.current       = socketId;       }, [socketId]);
+  useEffect(() => { isUserNotFoundRef.current = isUserNotFound; }, [isUserNotFound]);
+  useEffect(() => { usernameRef.current       = username;       }, [username]);
 
   const stopMediaTracks = useCallback((stream) => {
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-    }
+    stream?.getTracks().forEach((track) => track.stop());
   }, []);
 
   const getMediaStream = useCallback(async () => {
     try {
       setLoading(true);
+      setMediaError(null);
 
-      if (localStream) {
-        stopMediaTracks(localStream);
-      }
-
-      if (navigator.permissions) {
-        try {
-          const camPerm = await navigator.permissions.query({ name: "camera" });
-          const micPerm = await navigator.permissions.query({
-            name: "microphone",
-          });
-
-          if (camPerm.state === "denied" || micPerm.state === "denied") {
-            alert(
-              "Camera or microphone permission is blocked. Please enable it from your browser settings."
-            );
-
-            return;
-          }
-        } catch (permError) {
-          console.warn("Permissions API failed:", permError);
-        }
-      }
+      if (localStreamRef.current) stopMediaTracks(localStreamRef.current);
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user" },
@@ -66,44 +59,97 @@ const Chat = () => {
       setLoading(false);
       return stream;
     } catch (error) {
-      console.error(
-        `Error accessing media devices: ${error.name} - ${error.message}`
-      );
-
-      if (error.name === "NotAllowedError") {
-        alert("Permission denied. Please allow camera and microphone access.");
-      } else if (error.name === "NotFoundError") {
-        alert("No camera/microphone found. Check if your device is connected.");
-      } else if (error.name === "AbortError") {
-        alert("Camera is busy or unavailable. Try restarting your device.");
-      } else if (error.name === "NotReadableError") {
-        alert("Camera is already in use by another application.");
-      } else {
-        alert("Something went wrong while accessing your camera/mic.");
-      }
-
       setLoading(false);
-      throw error;
-    }
-  }, [localStream, stopMediaTracks]);
-
-  const handleEnterChat = useCallback(
-    async (e) => {
-      e.preventDefault();
-      const formData = new FormData(e.target);
-      const name = formData.get("username");
-      setIsLoading(true);
-      if (name.trim()) {
-        socket.emit("user entered", { username: name });
-        const stream = await getMediaStream();
-        setLocalStream(stream);
-        setShowChat(true);
-        setUsername(name);
-        e.target.reset();
+      let message = "";
+      switch (error.name) {
+        case "NotAllowedError":
+        case "PermissionDeniedError":
+          message = "Camera & microphone access was denied. Click the 🔒 icon in your browser's address bar, allow access, then try again.";
+          break;
+        case "NotFoundError":
+        case "DevicesNotFoundError":
+          message = "No camera or microphone found. Please connect a device and try again.";
+          break;
+        case "NotReadableError":
+        case "TrackStartError":
+          message = "Your camera or mic is already in use by another app. Close it and try again.";
+          break;
+        case "AbortError":
+          message = "Media access was interrupted. Please try again.";
+          break;
+        default:
+          message = "Unable to access camera/mic. Please check your device and try again.";
       }
-    },
-    [getMediaStream]
-  );
+      setMediaError(message);
+      return null;
+    }
+  }, [stopMediaTracks]);
+
+  // ── Timeout ────────────────────────────────────────────────────────────────
+
+  const clearMatchTimeout = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }, []);
+
+  const startMatchTimeout = useCallback((signalingHasStarted) => {
+    clearMatchTimeout();
+    const duration = signalingHasStarted ? SIGNALING_TIMEOUT : NO_PEER_TIMEOUT;
+    timeoutRef.current = setTimeout(() => {
+      setIsUserNotFound(true);
+      setIsRetrying(false);
+    }, duration);
+  }, [clearMatchTimeout]);
+
+  // ── Peer ───────────────────────────────────────────────────────────────────
+
+  const destroyPeer = useCallback(() => {
+    if (connectionRef.current) {
+      connectionRef.current.destroy();
+      connectionRef.current = null;
+    }
+  }, []);
+
+  // ── Matching ───────────────────────────────────────────────────────────────
+
+  const startMatching = useCallback((name) => {
+    destroyPeer();
+    setIsUserNotFound(false);
+    setIsRetrying(true);
+    setRoomId(null);
+    setRemoteStream(null);
+    socket.emit("user entered", { username: name });
+    startMatchTimeout(false);
+  }, [destroyPeer, startMatchTimeout]);
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  const handleEnterChat = useCallback(async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const name = formData.get("username");
+    if (!name.trim()) return;
+
+    const stream = await getMediaStream();
+    if (!stream) return; // gate — no stream = no entry
+
+    setIsLoading(true);
+    setLocalStream(stream);
+    setShowChat(true);
+    setUsername(name);
+    e.target.reset();
+    startMatching(name);
+  }, [getMediaStream, startMatching]);
+
+  // Retry from NoUserFound — user is deleted from DB on end chat,
+  // so retry re-registers them fresh via startMatching → "user entered"
+  const handleRetry = useCallback(() => {
+    const name = usernameRef.current;
+    if (!name) return;
+    startMatching(name);
+  }, [startMatching]);
 
   const sendMessage = useCallback(() => {
     if (input.trim()) {
@@ -113,47 +159,42 @@ const Chat = () => {
   }, [input, roomId]);
 
   const handleEndChat = useCallback(() => {
-    if (roomId) {
-      socket.emit("end chat", roomId);
-    }
+    if (roomId) socket.emit("end chat", roomId);
   }, [roomId]);
 
-  useEffect(() => {
-    let timeOutId;
-    if (isLaoding && !roomId) {
-      timeOutId = setTimeout(() => {
-        setIsUserNotFound(true);
-      }, 30000);
-    }
-    return () => clearTimeout(timeOutId);
-  }, [isLaoding, roomId]);
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  useEffect(() => () => clearMatchTimeout(), [clearMatchTimeout]);
 
   useEffect(() => {
-    const handleUnload = () => {
-      handleEndChat();
-    };
-
+    const handleUnload = () => handleEndChat();
     window.addEventListener("beforeunload", handleUnload);
-    window.addEventListener("unload", handleUnload); // backup in some browsers
-
+    window.addEventListener("unload",       handleUnload);
     return () => {
       window.removeEventListener("beforeunload", handleUnload);
-      window.removeEventListener("unload", handleUnload);
+      window.removeEventListener("unload",       handleUnload);
     };
   }, [handleEndChat]);
 
+  // ── Socket listeners — registered ONCE on mount via empty deps ────────────
+
   useEffect(() => {
-    socket.on("get socket id", (socketId) => {
-      setSocketId(socketId);
+    socket.on("get socket id", (id) => {
+      setSocketId(id);
+      socketIdRef.current = id;
     });
 
     socket.on("getMatchedPeer", (peerSocketId) => {
-      console.log('peerSocketId =>', peerSocketId);
-      console.log('socketId =>', socketId);
-      if (!peerSocketId || !socketId) return;
+      const currentSocketId = socketIdRef.current;
+      if (!peerSocketId || !currentSocketId) return;
 
-      // Ensure we're not loading and initiate only from the lower socketId
-      if (!loading && socketId < peerSocketId) {
+      // Peer appeared while on NoUserFound — auto-retry
+      if (isUserNotFoundRef.current) {
+        startMatching(usernameRef.current);
+        return;
+      }
+
+      if (currentSocketId < peerSocketId) {
         socket.emit("invite private chat", peerSocketId);
       }
     });
@@ -162,48 +203,58 @@ const Chat = () => {
       socket.emit("invite accepted", inviterId);
     });
 
+    // callAccepted registered here (top level) — never duplicated
+    socket.on("callAccepted", (signal) => {
+      const peer = connectionRef.current;
+      if (peer && !peer.destroyed && typeof peer.signal === "function") {
+        peer.signal(signal);
+      } else {
+        console.warn("callAccepted: peer not ready, ignoring signal");
+      }
+    });
+
     socket.on("enter chat room", (room) => {
+      setIsRetrying(false);
+      // Signaling started — upgrade to 2min timeout unconditionally
+      startMatchTimeout(true);
+
       setRoomId(room?.roomId);
-      const peerSocketId = room?.users.find((item) => item !== socketId);
-      const isInitiator = socketId < peerSocketId;
+      const currentSocketId = socketIdRef.current;
+      const peerSocketId    = room?.users.find((id) => id !== currentSocketId);
+      const isInitiator     = currentSocketId < peerSocketId;
 
-      if (isInitiator) {
-        try {
-          const peer = new Peer({
-            initiator: true,
-            trickle: false,
-            stream: localStream,
+      if (!isInitiator) return; // non-initiator waits for getUserCall
+
+      try {
+        const stream = localStreamRef.current;
+
+        const peer = new Peer({
+          initiator: true,
+          trickle:   false,
+          stream,
+        });
+
+        peer.on("signal", (sdp) => {
+          socket.emit("callUser", {
+            userToCall: peerSocketId,
+            signalData: sdp,
+            from:       currentSocketId,
           });
+        });
 
-          peer.on("signal", (sdp) => {
-            socket.emit("callUser", {
-              userToCall: peerSocketId,
-              signalData: sdp,
-              from: socketId,
-              name: username,
-            });
-          });
+        peer.on("stream", (remote) => {
+          setRemoteStream(remote);
+          setIsLoading(false);
+          clearMatchTimeout(); // fully connected — no timeout needed
+        });
 
-          peer.on("stream", (remoteStream) => {
-            setRemoteStream(remoteStream);
-            setIsLoading(false);
-          });
+        peer.on("error", (err) => {
+          console.error("Peer error (initiator):", err);
+        });
 
-          socket.on("callAccepted", (signal) => {
-            if (peer && !peer.destroyed && typeof peer.signal === "function") {
-              peer.signal(signal);
-              setLoading(false);
-            } else {
-              console.warn(
-                "Signal skipped: Peer is destroyed or not initialized."
-              );
-            }
-          });
-
-          connectionRef.current = peer;
-        } catch (error) {
-          console.error("Call initiation failed:", error);
-        }
+        connectionRef.current = peer;
+      } catch (error) {
+        console.error("Call initiation failed:", error);
       }
     });
 
@@ -213,22 +264,43 @@ const Chat = () => {
 
     socket.on("getUserCall", async (data) => {
       try {
-        const stream = await getMediaStream();
-        setLocalStream(stream);
+        // Use existing stream — never request camera again on receiver side
+        let stream = localStreamRef.current;
+
+        if (!stream) {
+          // Fallback: should not happen if handleEnterChat ran correctly
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: "user" },
+              audio: true,
+            });
+            setLocalStream(stream);
+          } catch {
+            return; // no stream — can't answer
+          }
+        }
+
+        // Signaling starting on receiver side too — upgrade timeout
+        startMatchTimeout(true);
 
         const peer = new Peer({
           initiator: false,
-          trickle: false,
-          stream: stream,
+          trickle:   false,
+          stream,
         });
 
         peer.on("signal", (signal) => {
           socket.emit("answerCall", { signal, to: data.from });
         });
 
-        peer.on("stream", (remoteStream) => {
-          setRemoteStream(remoteStream);
+        peer.on("stream", (remote) => {
+          setRemoteStream(remote);
           setIsLoading(false);
+          clearMatchTimeout(); // fully connected
+        });
+
+        peer.on("error", (err) => {
+          console.error("Peer error (receiver):", err);
         });
 
         peer.signal(data.signal);
@@ -239,9 +311,14 @@ const Chat = () => {
     });
 
     socket.on("close chat room", () => {
-      stopMediaTracks(localStream);
+      // Stop tracks and clean up peer
+      stopMediaTracks(localStreamRef.current);
+      clearMatchTimeout();
+      destroyPeer();
+
+      // Reset all state — user goes back to Lobby to re-enter
+      // (BE has deleted their DB entry so they must re-register)
       setShowChat(false);
-      setRoomId(null);
       setRoomId(null);
       setRemoteStream(null);
       setLocalStream(null);
@@ -249,32 +326,31 @@ const Chat = () => {
       setInput("");
       setSocketId(null);
       setLoading(false);
+      setIsLoading(false);
       setMessages([]);
-      connectionRef?.current?.destroy();
+      setMediaError(null);
+      setIsRetrying(false);
+      // Note: do NOT reset isUserNotFound here —
+      // close chat room fires during normal end chat, not a "not found" scenario
     });
 
     return () => {
       socket.off("get socket id");
       socket.off("getMatchedPeer");
-      socket.off("callAccepted");
       socket.off("invite requested");
+      socket.off("callAccepted");
       socket.off("enter chat room");
       socket.off("receive chat message");
       socket.off("close chat room");
       socket.off("getUserCall");
-      socket.off("close chat room");
     };
-  }, [
-    getMediaStream,
-    loading,
-    localStream,
-    socketId,
-    stopMediaTracks,
-    username,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return isUserNotFound ? (
-    <NoUserFound />
+    <NoUserFound onRetry={handleRetry} isRetrying={isRetrying} />
   ) : loading || isLaoding ? (
     <div className="flex items-center justify-center h-screen bg-gray-100">
       <LoadingSpinner />
@@ -282,10 +358,25 @@ const Chat = () => {
   ) : (
     <div className="p-4 bg-gradient-to-br from-blue-50 to-white overflow-auto">
       {!showChat ? (
-        <Lobby onEnterChat={handleEnterChat} />
+        <>
+          {mediaError && (
+            <div className="max-w-md mx-auto mb-4 p-4 bg-red-50 border border-red-300 rounded-lg flex flex-col gap-3">
+              <div className="flex items-start gap-3">
+                <span className="text-xl">🎥</span>
+                <p className="text-sm text-red-800">{mediaError}</p>
+              </div>
+              <button
+                onClick={() => setMediaError(null)}
+                className="self-start text-xs text-red-600 underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+          <Lobby onEnterChat={handleEnterChat} />
+        </>
       ) : (
         <div className="p-3 bg-gradient-to-br from-blue-50 to-white h-[calc(100vh-120px)]">
-          {/* Header */}
           <header className="flex justify-between items-center mb-2">
             <h2 className="text-2xl font-bold text-gray-800">
               Welcome, {username}
@@ -297,7 +388,6 @@ const Chat = () => {
               End Chat
             </button>
           </header>
-
           <div className="flex gap-4 h-full">
             <Streams localStream={localStream} remoteStream={remoteStream} />
             <ChatComp
